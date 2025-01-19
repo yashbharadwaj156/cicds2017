@@ -1,0 +1,260 @@
+**Original Code vs GCN Updated Code Comparison**
+
+---
+
+### **1. Data Loading and Preprocessing**
+
+**Before (Original Code):**
+```python
+import pandas as pd
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+
+# Load CSV files
+df = pd.concat([
+    pd.read_csv("/kaggle/input/network-intrusion-dataset/Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv"),
+    pd.read_csv("/kaggle/input/network-intrusion-dataset/Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv"),
+    ...
+], axis=0)
+df.fillna(0, inplace=True)
+encoder = LabelEncoder()
+df[' Label'] = encoder.fit_transform(df[' Label'])
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(df.drop(columns=[' Label']))
+y = df[' Label'].values
+```
+
+**After (GCN Code):**
+```python
+from torch_geometric.data import Data
+import torch
+
+# Convert labels to numeric
+attack_mapping = {
+    'BENIGN': 0,
+    'DDoS': 1,
+    'PortScan': 2,
+    'Web Attack': 3,
+    'Infiltration': 4
+}
+df[' Label'] = df[' Label'].map(attack_mapping)
+
+# Create node features
+X = torch.tensor(df.drop(columns=[' Label']).values, dtype=torch.float)
+y = torch.tensor(df[' Label'].values, dtype=torch.long)
+
+# Create edge index based on source IP similarity
+edges = []
+for i in range(len(df)):
+    for j in range(i+1, len(df)):
+        if df.iloc[i][' Source IP'] == df.iloc[j][' Source IP']:
+            edges.append([i, j])
+edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+
+data = Data(x=X, edge_index=edge_index, y=y)
+```
+
+---
+
+### **2. Splitting Data for Training and Testing**
+
+**Before (Original Code):**
+```python
+X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.3, random_state=42)
+```
+
+**After (GCN Code):**
+```python
+from torch_geometric.transforms import RandomNodeSplit
+
+data = RandomNodeSplit(num_train=0.7, num_val=0.2, num_test=0.1)(data)
+X_train, X_test = data.x[data.train_mask], data.x[data.test_mask]
+y_train, y_test = data.y[data.train_mask], data.y[data.test_mask]
+```
+
+---
+
+### **3. Model Definition**
+
+**Before (Original CNN Code):**
+```python
+from keras.models import Sequential
+from keras.layers import Dense, Conv1D, Flatten
+
+cnn_model = Sequential([
+    Conv1D(filters=64, kernel_size=3, activation='relu', input_shape=(X_scaled.shape[1], 1)),
+    Flatten(),
+    Dense(128, activation='relu'),
+    Dense(len(set(y)), activation='softmax')
+])
+cnn_model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+```
+
+**After (GCN Code):**
+```python
+from torch_geometric.nn import GCNConv
+import torch.nn.functional as F
+import torch.nn as nn
+
+class GCNModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(GCNModel, self).__init__()
+        self.conv1 = GCNConv(input_dim, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, output_dim)
+
+    def forward(self, data):
+        x, edge_index = data.x, data.edge_index
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
+        x = self.conv2(x, edge_index)
+        return F.log_softmax(x, dim=1)
+
+model = GCNModel(input_dim=X.shape[1], hidden_dim=64, output_dim=len(set(y)))
+```
+
+---
+
+### **4. Model Training**
+
+**Before (Original Code):**
+```python
+cnn_model.fit(X_train, y_train, batch_size=32, epochs=100)
+```
+
+**After (GCN Code):**
+```python
+import torch.optim as optim
+
+optimizer = optim.Adam(model.parameters(), lr=0.01)
+loss_fn = nn.CrossEntropyLoss()
+
+for epoch in range(100):
+    optimizer.zero_grad()
+    out = model(data)
+    loss = loss_fn(out[data.train_mask], data.y[data.train_mask])
+    loss.backward()
+    optimizer.step()
+    print(f'Epoch {epoch+1}, Loss: {loss.item()}')
+```
+
+---
+
+### **5. Model Evaluation**
+
+**Before (Original Code):**
+```python
+predictions = cnn_model.predict(X_test)
+accuracy = accuracy_score(y_test, predictions)
+```
+
+**After (GCN Code):**
+```python
+model.eval()
+pred = model(data).argmax(dim=1)
+y_pred = pred[data.test_mask]
+accuracy = (y_pred == y_test).sum().item() / y_test.size(0)
+print(f'GCN Model Accuracy: {accuracy * 100:.2f}%')
+```
+
+---
+
+### **6. Model Saving**
+
+**Before (Original Code):**
+```python
+cnn_model.save("cnn_model.h5")
+```
+
+**After (GCN Code):**
+```python
+torch.save(model.state_dict(), 'gcn_model.pth')
+```
+
+---
+
+**Conclusion:**
+This transformation replaces traditional CNN models with a GCN approach, enabling better handling of relationships between network flows through graph-based learning.
+
+_______________________________________________________________________________________________________________________________
+
+
+  ### Explanation of the GCN Data Splitting Code
+
+#### **Code Snippet**
+```python
+from torch_geometric.transforms import RandomNodeSplit
+
+data = RandomNodeSplit(num_train=0.7, num_val=0.2, num_test=0.1)(data)
+X_train, X_test = data.x[data.train_mask], data.x[data.test_mask]
+y_train, y_test = data.y[data.train_mask], data.y[data.test_mask]
+```
+
+---
+
+### **Explanation of Each Line**
+
+1. **`from torch_geometric.transforms import RandomNodeSplit`**  
+   - This imports the `RandomNodeSplit` transformation from PyTorch Geometric.
+   - **Purpose:** It is used to randomly split nodes in a graph into training, validation, and test sets.
+
+2. **`data = RandomNodeSplit(num_train=0.7, num_val=0.2, num_test=0.1)(data)`**  
+   - This applies the `RandomNodeSplit` transformation to the `data` object, which contains node features, labels, and edges.
+   - **Parameters:**
+     - `num_train=0.7`: Allocates 70% of the nodes to the training set.
+     - `num_val=0.2`: Allocates 20% of the nodes to the validation set.
+     - `num_test=0.1`: Allocates 10% of the nodes to the test set.
+   - **Background:**  
+     - Unlike traditional train-test splits (e.g., `train_test_split` in sklearn), graph-based datasets require node-wise splitting to preserve relationships within the data structure.
+
+3. **`X_train, X_test = data.x[data.train_mask], data.x[data.test_mask]`**  
+   - Here, `data.x` contains the node feature matrix (all input features for each node).
+   - `data.train_mask` is a boolean tensor that indicates which nodes belong to the training set.
+   - `data.test_mask` indicates which nodes belong to the test set.
+   - **What Happens Internally:**  
+     - `data.x[data.train_mask]`: Extracts feature values for nodes that are part of the training set.
+     - `data.x[data.test_mask]`: Extracts feature values for nodes that are part of the test set.
+
+4. **`y_train, y_test = data.y[data.train_mask], data.y[data.test_mask]`**  
+   - `data.y` contains the labels corresponding to each node.
+   - `data.y[data.train_mask]`: Extracts labels for the training nodes.
+   - `data.y[data.test_mask]`: Extracts labels for the test nodes.
+
+---
+
+### **What is `data.train_mask`?**
+
+- **Definition:**  
+  `data.train_mask` is a boolean tensor (a mask) that indicates which nodes should be used for training.
+- **Example:**  
+  Suppose we have 10 nodes, and the train mask looks like this:
+
+  ```python
+  data.train_mask = [True, True, False, False, True, False, True, False, False, False]
+  ```
+
+  This means that nodes indexed `0, 1, 4, 6` are part of the training set.
+
+- **Purpose:**  
+  The mask helps to selectively train the model only on the specified nodes while ignoring others.
+
+---
+
+### **Key Differences from Traditional Train-Test Split**
+
+| Traditional Approach (`train_test_split`) | GCN Approach (`RandomNodeSplit`)               |
+|------------------------------------------|------------------------------------------------|
+| Works on independent samples             | Works on graph-structured data                 |
+| Splits data randomly                     | Ensures relational dependencies are preserved  |
+| Features and labels split separately     | Nodes are split while maintaining connectivity |
+| No edge relationships                    | Maintains edge relationships in the split data |
+
+---
+
+### **Summary**
+
+- `RandomNodeSplit` ensures that graph structure is maintained while splitting the data.
+- The masks (`train_mask`, `val_mask`, `test_mask`) help efficiently split the dataset for training and evaluation.
+- This approach is essential when working with graph-based models to avoid information leakage between connected nodes.
+
+---
+
+Let me know if you need further clarification or examples! 😊
