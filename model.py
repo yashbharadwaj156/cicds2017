@@ -253,3 +253,71 @@ def predict(model,
     y_true = y_true.cpu().numpy()
 
     return y_true, y_pred
+
+
+#####################################################################################################################################
+class NodeClassificator(nn.Module):
+    def __init__(self, dataset, num_classes, num_convs: int = 8, hid: int = 128, dropout: float = 0.5,
+                 alpha: float = 0.5, theta: float = 0.7, bilstm_hidden_size: int = 64, bilstm_layers: int = 2, timestamp: int = 5):
+        super(NodeClassificator, self).__init__()
+        self.hid = hid
+        self.num_layers = num_convs
+        self.timestamp = timestamp
+
+        self.lin1 = nn.Linear(dataset.num_node_features, hid)
+
+        self.convs = nn.ModuleList()
+        for layer_index in range(num_convs):
+            conv = GCN2Conv(
+                channels=hid,
+                alpha=alpha,
+                theta=theta,
+                layer=layer_index + 1,
+                normalize=True
+            )
+            self.convs.append(conv)
+
+        self.norm = LayerNorm(hid, elementwise_affine=True)
+        self.dropout = nn.Dropout(p=dropout)
+
+        # BiLSTM layer
+        self.bilstm = nn.LSTM(
+            input_size=hid,
+            hidden_size=bilstm_hidden_size,
+            num_layers=bilstm_layers,
+            bidirectional=True,
+            batch_first=True
+        )
+        self.bilstm_hidden_size = bilstm_hidden_size
+
+        # Fully connected layers
+        self.fc1 = nn.Linear(bilstm_hidden_size * 2, hid)  # BiLSTM is bidirectional, so hidden_size * 2
+        self.fc2 = nn.Linear(hid, num_classes)
+
+    def forward(self, x, edge_index, edge_attr):
+        x = self.lin1(x)
+        x0 = x
+
+        for conv in self.convs:
+            x = self.dropout(x)
+            x = F.gelu(conv(x, x0, edge_index))
+
+        x = F.gelu(self.norm(x))
+        x = F.dropout(x, p=0.5, training=self.training)
+
+        # Reshape for BiLSTM: (batch_size, sequence_length, feature_size)
+        batch_size = x.size(0)
+        if batch_size % self.timestamp != 0:
+            raise ValueError(f"Batch size ({batch_size}) must be divisible by timestamp ({self.timestamp}).")
+
+        x = x.view(batch_size // self.timestamp, self.timestamp, -1)  # Reshape into sequences
+        x, _ = self.bilstm(x)  # BiLSTM output
+
+        # Take the last hidden state of the sequence
+        x = x[:, -1, :]  # Shape: (batch_size // timestamp, bilstm_hidden_size * 2)
+
+        x = F.gelu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+
+        return x
